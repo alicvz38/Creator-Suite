@@ -1,0 +1,30 @@
+# ------------------------------------------------------------
+# Depoya YALNIZCA kaynak kodu (dist/) ve belgeler girer.
+# Ana klasördeki derlenmiş programlar, kurulum dosyası ve
+# KİŞİSEL AYARLAR (settings.json, Profiles/ — yayın anahtarı içerir) asla yüklenmez.
+# Kurulum ve Portable sürümler GitHub "Releases" bölümünde yayınlanır.
+# ------------------------------------------------------------
+/*
+!/.gitignore
+!/README.md
+!/LICENSE
+!/dist/
+
+# Üçüncü taraf ikili dosyalar (FFmpeg 101 MB, .NET kütüphaneleri):
+# Portable sürümde bulunur, derlemek için oradan "lib" klasörünü kopyalayın.
+/dist/lib/
+
+# Derleme ara dosyaları
+*.obj
+*.res
+*.pdb
+*.ilk
+*.exp
+*.exe
+*.dll
+
+# Editör / sistem
+.vs/
+.vscode/
+Thumbs.db
+desktop.ini
