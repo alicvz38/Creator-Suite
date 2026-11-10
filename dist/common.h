@@ -17,10 +17,29 @@
 #include <thread>
 #include <vector>
 
+// Hata kaydı ve çökme koruması (common.cpp). Kayıt: data_dir()\error-log.txt; çökme dökümü: data_dir()\Crash\*.dmp
+void log_error(const std::string& text);        // Aynı metin 10 saniyede bir kez yazılır
+void install_crash_guard();                     // wWinMain başında: yakalanmayan hata ve abort öncesi döküm + kayıt
+// json'ın iç denetimi başarısız olursa "Assertion failed" kutusu çıkıp program kapanmasın: kaydedilir, istisna atılır
+[[noreturn]] void json_check_failed(const char* expr, const char* file, int line);
+#define JSON_ASSERT(x) ((x) ? (void)0 : json_check_failed(#x, __FILE__, __LINE__))
+
 #include "json.hpp"
 
 using Microsoft::WRL::ComPtr;
 using json = nlohmann::json;
+
+// İş parçacığı ve tur gövdeleri için: hata programı kapatmaz, kaydedilir
+template <typename F>
+void guarded(const char* where, F&& body) {
+    try {
+        body();
+    } catch (const std::exception& e) {
+        log_error(std::string(where) + ": " + e.what());
+    } catch (...) {
+        log_error(std::string(where) + ": bilinmeyen hata");
+    }
+}
 
 std::wstring widen(const std::string& text);
 std::string narrow(const std::wstring& text);

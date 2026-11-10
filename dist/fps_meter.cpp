@@ -25,7 +25,7 @@ void FpsMeter::start() {
     halt_ = false;
     last_frames_ = frames_;
     last_time_ = now();
-    thread_ = std::thread(&FpsMeter::run, this);
+    thread_ = std::thread([this] { guarded("FPS ölçer", [this] { run(); }); });
 }
 
 void FpsMeter::stop() {
@@ -162,7 +162,7 @@ void Pinger::start(const std::string& host) {
         results_.clear();
         error_.clear();
     }
-    thread_ = std::thread(&Pinger::run, this, host);
+    thread_ = std::thread([this, host] { guarded("ping", [&] { run(host); }); });
 }
 
 void Pinger::stop() {
@@ -252,7 +252,7 @@ void Sensors::start() {
         std::lock_guard<std::mutex> g(lock_);
         error_ = "lib\\sensor.exe açılamadı";
     }
-    thread_ = std::thread(&Sensors::read_helper, this);
+    thread_ = std::thread([this] { guarded("sensörler", [this] { read_helper(); }); });
 }
 
 void Sensors::stop() {
@@ -312,7 +312,7 @@ void Sensors::read_helper() {
             if (!line.is_object()) continue;
             std::lock_guard<std::mutex> g(lock_);
             if (line.contains("error")) {
-                error_ = line["error"].get<std::string>();
+                error_ = line["error"].is_string() ? line["error"].get<std::string>() : line["error"].dump();
             } else {
                 status_ = "ok";
                 data_ = std::move(line);
@@ -409,11 +409,15 @@ const json* fps_pick_gpu(const json& data, const std::string& name) {
     // Seçili ekran kartı; yoksa harici kart, o da yoksa ilk kart
     auto it = data.find("gpus");
     if (it == data.end() || !it->is_array() || it->empty()) return nullptr;
+    // Sensör listesi bir an eksik ya da bozuk gelebilir (oyun harita yüklerken): nesne olmayan kayıt atlanır
+    auto text = [](const json& g, const char* key) { auto f = g.find(key); return f != g.end() && f->is_string() ? f->get<std::string>() : std::string(); };
     for (auto& g : *it)
-        if (g.value("name", std::string()) == name) return &g;
+        if (g.is_object() && text(g, "name") == name) return &g;
     for (auto& g : *it)
-        if (g.value("discrete", false)) return &g;
-    return &(*it)[0];
+        if (g.is_object() && g.contains("discrete") && g["discrete"].is_boolean() && g["discrete"].get<bool>()) return &g;
+    for (auto& g : *it)
+        if (g.is_object()) return &g;
+    return nullptr;
 }
 
 // Canlı değer yoksa örnek değeri kullan: önizlemede kapalı bir bilgi de görünsün
@@ -514,9 +518,9 @@ struct Builder {
         c.tmpl = tmpl;
         if (!prefix.empty()) c.parts.push_back({prefix, 'u', unit});
         std::string text = "--";
-        if (known) {
-            char buffer[32];
-            sprintf_s(buffer, "%.*f", decimals, value);
+        if (known && std::isfinite(value)) {    // Sensör bir an saçma büyük değer verse de tampon taşmasın
+            char buffer[64];
+            snprintf(buffer, sizeof(buffer), "%.*f", decimals, std::clamp(value, -1e9, 1e9));
             text = buffer;
         }
         if (text.size() > tmpl.size()) {   // Sığmayan değer şablonun en büyüğüyle sınırlansın
@@ -608,11 +612,12 @@ std::vector<FpsRow> fps_rows(const json& s, double fps, int hz, const json& data
             for (size_t i = 0; i < cores.size(); i += kCoresPerRow) {
                 std::vector<std::pair<int, FpsCell>> row;
                 for (size_t n = 0; n < kCoresPerRow && i + n < cores.size(); n++) {
-                    const json& core = cores[i + n];
-                    const bool known = core.size() > 1 && core[1].is_number();
+                    const json& core = cores[i + n];     // Beklenen: ["C1", 62]; eksik ya da bozuk kayıt "--" olur
+                    const bool pair = core.is_array() && !core.empty();
+                    const bool known = pair && core.size() > 1 && core[1].is_number();
                     const double v = known ? core[1].get<double>() : 0;
-                    row.push_back({int(n), b.cell(known, v, 0, "°C", "100", known ? b.temp_color(v) : b.color,
-                                                  core[0].get<std::string>() + " ")});
+                    const std::string name = pair && core[0].is_string() ? core[0].get<std::string>() : "C" + std::to_string(i + n + 1);
+                    row.push_back({int(n), b.cell(known, v, 0, "°C", "100", known ? b.temp_color(v) : b.color, name + " ")});
                 }
                 b.add("", std::move(row), false);
             }
@@ -627,9 +632,14 @@ std::vector<FpsRow> fps_rows(const json& s, double fps, int hz, const json& data
     if (b.on("show_disk_temp")) {
         if (auto it = data.find("disks"); it != data.end() && it->is_array()) {
             std::map<std::string, int> total, seen;
-            for (auto& d : *it) total[d.value("type", std::string("DISK"))]++;
+            auto disk_type = [](const json& d) {
+                auto f = d.is_object() ? d.find("type") : d.end();
+                return f != d.end() && f->is_string() ? f->get<std::string>() : std::string("DISK");
+            };
+            for (auto& d : *it) if (d.is_object()) total[disk_type(d)]++;
             for (auto& d : *it) {
-                const std::string type = d.value("type", std::string("DISK"));
+                if (!d.is_object()) continue;
+                const std::string type = disk_type(d);
                 seen[type]++;
                 b.add(type + (total[type] > 1 ? std::to_string(seen[type]) : ""), {{MAIN, b.temp(d, "temp")}});
             }

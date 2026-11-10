@@ -1,5 +1,8 @@
 // Oyun Araçları: ekrandaki crosshair ve FPS göstergesi. Çarpıyla kapatılınca saat yanındaki simgelere iner,
 // göstergeler çalışmaya devam eder. Kayıt Stüdyosu'ndan bağımsız ayrı bir programdır.
+#include "common.h"
+#include "imgui/imgui.h"
+#include "imgui/imgui_internal.h"   // Hata kurtarma; ui.h'deki ImGui kısaltmalarından önce gelmeli
 #include "ui.h"
 #include "fps_meter.h"
 #include "now_playing.h"
@@ -3089,7 +3092,7 @@ int App::run(bool startup) {
     ImGui_ImplDX11_Init(device_.Get(), ctx_.Get());
 
     add_tray_icon();
-    keys_thread_ = std::thread(&App::hotkey_thread, this);
+    keys_thread_ = std::thread([this] { guarded("kısayollar", [this] { hotkey_thread(); }); });
     if (startup) {      // Bilgisayar açılışı: pencere açılmaz, işaretli göstergeler başlar
         crosshair_on_ = opt_.value("crosshair_autostart", false);
         fps_on_ = opt_.value("fps_autostart", false);
@@ -3108,8 +3111,9 @@ int App::run(bool startup) {
             DispatchMessageW(&msg);
         }
         if (quit) break;
-        lang_tick();
-        tick();
+        // Beklenmeyen bir hata (ör. oyun harita yüklerken sensör değerinin bir an bozuk gelmesi) programı kapatmasın:
+        // kaydedilir, göstergeler çalışmaya devam eder
+        guarded("tick", [&] { lang_tick(); tick(); });
         if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) {   // Pencere görünmüyorsa çizim yok: kaynak harcanmaz
             MsgWaitForMultipleObjects(0, nullptr, FALSE, keys_fast() ? 15 : 50, QS_ALLINPUT);     // Tuş göstergesi gecikmesin
             continue;
@@ -3118,6 +3122,10 @@ int App::run(bool startup) {
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
+        ImGuiErrorRecoveryState recovery;
+        ImGui::ErrorRecoveryStoreState(&recovery);
+        bool frame_ok = true;
+        try {
         theme_tick();
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(io.DisplaySize);
@@ -3142,6 +3150,20 @@ int App::run(bool startup) {
         else ImGui::TextDisabled("%s", T(message_.c_str()));
         ImGui::End();
         manual_frame(2);
+        } catch (const std::exception& e) {
+            log_error(std::string("arayüz: ") + e.what());
+            frame_ok = false;
+        } catch (...) {
+            log_error("arayüz: bilinmeyen hata");
+            frame_ok = false;
+        }
+        if (!frame_ok) {     // Yarım kalan Begin/Push çağrıları kapatılır, bir sonraki kare temiz başlar
+            ImGuiIO& eio = ImGui::GetIO();
+            const bool asserts = eio.ConfigErrorRecoveryEnableAssert;
+            eio.ConfigErrorRecoveryEnableAssert = false;
+            ImGui::ErrorRecoveryTryToRecoverState(&recovery);
+            eio.ConfigErrorRecoveryEnableAssert = asserts;
+        }
         ImGui::Render();
         ID3D11RenderTargetView* rtv = rtv_.Get();
         ctx_->OMSetRenderTargets(1, &rtv, nullptr);
@@ -3178,7 +3200,21 @@ int App::run(bool startup) {
     return 0;
 }
 
+static LRESULT wnd_proc_body(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+
+// Pencere iletisi işlenirken çıkan hata Windows'un içinden geçip programı kapatmasın
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    try {
+        return wnd_proc_body(hwnd, msg, wp, lp);
+    } catch (const std::exception& e) {
+        log_error(std::string("ileti ") + std::to_string(msg) + ": " + e.what());
+    } catch (...) {
+        log_error("ileti " + std::to_string(msg) + ": bilinmeyen hata");
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static LRESULT wnd_proc_body(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     mouse_position_fix(msg, lp);
     if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return 1;
     if (g_app && msg == g_show_message) { g_app->show_window(); return 0; }
@@ -3216,6 +3252,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
+    install_crash_guard();
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
